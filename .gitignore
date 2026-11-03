@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+album_data/
+photos/
+dataset/
+eval_similarity.png
+.streamlit/
