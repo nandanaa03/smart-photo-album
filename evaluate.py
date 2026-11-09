@@ -22,32 +22,56 @@ from face_engine import FaceEngine, SAME_PERSON_THRESHOLD
 from album import IMG_EXT
 
 
+def has_images(folder):
+    return any(f.lower().endswith(IMG_EXT) for f in os.listdir(folder))
+
+
+def find_people_root(root):
+    """Skip extra wrapper folders, e.g. dataset/Original Images/Original Images/<person>/."""
+    while True:
+        subs = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
+        if len(subs) == 1 and not has_images(root) and not has_images(os.path.join(root, subs[0])):
+            root = os.path.join(root, subs[0])
+        else:
+            return root
+
+
 def main(root, eps=0.55):
+    if not os.path.isdir(root):
+        sys.exit(f"Folder not found: {os.path.abspath(root)}")
+    root = find_people_root(root)
+    print(f"Reading people folders from: {os.path.abspath(root)}")
+
     eng = FaceEngine()
     embs, labels, total, detected = [], [], 0, 0
-    for person in sorted(os.listdir(root)):
+    people = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
+    for n, person in enumerate(people, 1):
         pdir = os.path.join(root, person)
-        if not os.path.isdir(pdir):
-            continue
-        for f in sorted(os.listdir(pdir)):
-            if not f.lower().endswith(IMG_EXT):
-                continue
+        imgs = sorted(os.path.join(r, f) for r, _, fs in os.walk(pdir)
+                      for f in fs if f.lower().endswith(IMG_EXT))
+        print(f"  [{n}/{len(people)}] {person}: {len(imgs)} images", flush=True)
+        for path in imgs:
             total += 1
-            dets, _ = eng.process_image(os.path.join(pdir, f))
+            dets, _ = eng.process_image(path)
             if dets:
                 detected += 1
                 d = max(dets, key=lambda d: d["bbox"][2] * d["bbox"][3])
                 embs.append(d["embedding"])
                 labels.append(person)
+
+    if total == 0:
+        sys.exit("\nNo images found. Expected: <folder>/<person name>/<photos>.jpg\n"
+                 f"Contents of {root}: {os.listdir(root)[:10]}")
+    if len(set(labels)) < 2:
+        sys.exit("\nNeed faces from at least 2 different people to evaluate.")
+
     embs, labels = np.array(embs), np.array(labels)
     print(f"\n== Detection ==\nImages: {total}  Face found: {detected}  Rate: {detected / max(total, 1):.1%}")
 
     # verification: every pair -> same person or not?
-    same, sims = [], []
-    for i, j in itertools.combinations(range(len(labels)), 2):
-        same.append(labels[i] == labels[j])
-        sims.append(float(embs[i] @ embs[j]))
-    same, sims = np.array(same), np.array(sims)
+    iu = np.triu_indices(len(labels), k=1)              # every unique pair (i < j)
+    sims = (embs @ embs.T)[iu]                           # cosine similarity of each pair
+    same = (labels[:, None] == labels[None, :])[iu]      # True if same person
     pred = sims >= SAME_PERSON_THRESHOLD
     tp, fp = np.sum(pred & same), np.sum(pred & ~same)
     fn, tn = np.sum(~pred & same), np.sum(~pred & ~same)
